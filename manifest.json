@@ -1,0 +1,14 @@
+{
+  "name": "GL Camera",
+  "short_name": "GL Camera",
+  "description": "WebGLで動くオフライン対応カメラ。ISO・シャッター・Log調整",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

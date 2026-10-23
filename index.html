@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>GL Camera</title>
+<style>
+  :root{--bg:#000;--fg:#eee;--dim:#888;--acc:#ffb020;--panel:rgba(20,20,22,.82)}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,system-ui,sans-serif;overflow:hidden;touch-action:manipulation}
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100%;max-height:100%;background:#000}
+  video{display:none}
+  #hud{position:fixed;top:env(safe-area-inset-top);left:0;right:0;padding:8px 12px;display:flex;justify-content:space-between;font:12px ui-monospace,Menlo,monospace;color:var(--fg);text-shadow:0 1px 3px #000;pointer-events:none}
+  #rec{color:#f33;display:none}
+  #panel{position:fixed;left:0;right:0;bottom:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--panel);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid #333}
+  .row{display:flex;align-items:center;gap:10px;margin:6px 0}
+  .row label{width:64px;color:var(--dim);font-size:12px;flex:none}
+  .row output{width:64px;text-align:right;font:13px ui-monospace,Menlo,monospace;color:var(--acc);flex:none}
+  input[type=range]{flex:1;accent-color:var(--acc);min-width:0}
+  .seg{display:flex;flex:1;border:1px solid #444;border-radius:8px;overflow:hidden}
+  .seg button{flex:1;padding:7px 4px;background:transparent;color:var(--fg);border:0;font-size:13px}
+  .seg button.on{background:var(--acc);color:#000;font-weight:600}
+  .btns{display:flex;justify-content:space-around;align-items:center;margin-top:8px}
+  .btns button{background:#2a2a2e;color:var(--fg);border:1px solid #444;border-radius:999px;padding:10px 16px;font-size:14px}
+  .btns .shot{width:64px;height:64px;padding:0;background:#fff;border:4px solid #888}
+  .btns .vid.on{background:#c22;border-color:#f66}
+  #msg{position:fixed;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:30px;background:#000;z-index:5}
+  #hw{display:none}
+  #hw.show{display:flex}
+  small{color:var(--dim)}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<video id="v" playsinline muted autoplay></video>
+<div id="hud"><span id="info">--</span><span id="rec">● REC</span></div>
+<div id="msg"></div>
+
+<div id="panel">
+  <div class="row"><label>ISO</label><input id="iso" type="range" min="0" max="7" step="1" value="2"><output id="isoV">400</output></div>
+  <div class="row"><label>シャッター</label><input id="shu" type="range" min="0" max="11" step="1" value="4"><output id="shuV">1/60</output></div>
+  <div class="row"><label>露出補正</label><input id="ev" type="range" min="-3" max="3" step="0.1" value="0"><output id="evV">±0.0</output></div>
+  <div class="row"><label>ガンマ</label>
+    <div class="seg" id="gamma"><button data-v="0" class="on">Normal</button><button data-v="1">S-Log3</button><button data-v="2">Log(Cineon)</button></div>
+  </div>
+  <div class="row" id="hw"><label>実機制御</label>
+    <div class="seg" id="hwseg"><button data-v="0" class="on">ソフト</button><button data-v="1">カメラ本体</button></div>
+  </div>
+  <div class="btns">
+    <button id="flip">切替</button>
+    <button id="shot" class="shot" aria-label="撮影"></button>
+    <button id="vid" class="vid">録画</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const ISOS = [100,200,400,800,1600,3200,6400,12800];
+const SHUT = [4000,2000,1000,500,250,125,60,30,15,8,4,2]; // 1/x 秒
+const st = { iso:400, shutter:1/60, ev:0, gamma:0, hw:false, facing:'environment', recording:false };
+
+// ---------- UI ----------
+function shutLabel(i){ return '1/'+SHUT[i]; }
+function updUI(){
+  st.iso = ISOS[+$('iso').value]; $('isoV').textContent = st.iso;
+  const si = +$('shu').value; st.shutter = 1/SHUT[si]; $('shuV').textContent = shutLabel(si);
+  st.ev = +$('ev').value; $('evV').textContent = (st.ev>=0?'+':'')+st.ev.toFixed(1);
+  if (st.hw) applyHW();
+}
+['iso','shu','ev'].forEach(id=>$(id).addEventListener('input',updUI));
+document.querySelectorAll('#gamma button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#gamma button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); st.gamma=+b.dataset.v;
+});
+document.querySelectorAll('#hwseg button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#hwseg button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); st.hw = b.dataset.v==='1'; if(st.hw) applyHW(); else resetHW();
+});
+function showMsg(t){ const m=$('msg'); m.style.display='flex'; m.innerHTML=t; }
+
+// ---------- Camera ----------
+const video = $('v');
+let stream=null, track=null, caps={};
+async function startCamera(){
+  if (stream) stream.getTracks().forEach(t=>t.stop());
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:st.facing}, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30}},
+      audio:false
+    });
+  }catch(e){
+    showMsg('カメラを開始できません。<br><small>'+e.name+': '+e.message+'<br>HTTPS(またはlocalhost)で開き、カメラ許可を確認してください。</small>');
+    return;
+  }
+  $('msg').style.display='none';
+  track = stream.getVideoTracks()[0];
+  caps = track.getCapabilities ? track.getCapabilities() : {};
+  video.srcObject = stream;
+  await video.play().catch(()=>{});
+  const hwOK = !!(caps.iso || caps.exposureTime);
+  $('hw').classList.toggle('show', hwOK);
+  if(!hwOK){ st.hw=false; }
+}
+async function applyHW(){
+  if(!track) return;
+  const adv = {};
+  if(caps.exposureMode && caps.exposureMode.includes('manual')) adv.exposureMode='manual';
+  if(caps.iso){ adv.iso = Math.min(caps.iso.max, Math.max(caps.iso.min, st.iso)); }
+  if(caps.exposureTime){
+    // 単位は100µs
+    const t = st.shutter*10000;
+    adv.exposureTime = Math.min(caps.exposureTime.max, Math.max(caps.exposureTime.min, t));
+  }
+  try{ await track.applyConstraints({advanced:[adv]}); }catch(e){ console.warn('HW制御失敗',e); }
+}
+async function resetHW(){
+  if(!track) return;
+  try{ await track.applyConstraints({advanced:[{exposureMode:'continuous'}]}); }catch(e){}
+}
+$('flip').onclick=()=>{ st.facing = st.facing==='environment'?'user':'environment'; startCamera(); };
+
+// ---------- WebGL2 ----------
+const cv = $('cv');
+const gl = cv.getContext('webgl2',{antialias:false,preserveDrawingBuffer:true,alpha:false});
+if(!gl){ showMsg('WebGL2に対応していません。'); }
+
+const VS = `#version 300 es
+in vec2 p; out vec2 uv;
+void main(){ uv = p*0.5+0.5; gl_Position = vec4(p,0.,1.); }`;
+
+// パス1: 時間方向の蓄積(スロー・シャッターの残像)
+const FS_ACC = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform sampler2D cam, prev; uniform float alpha; uniform float first;
+void main(){
+  vec3 c = texture(cam, vec2(uv.x, 1.-uv.y)).rgb;
+  vec3 h = texture(prev, uv).rgb;
+  o = vec4(mix(h, c, first>0.5 ? 1.0 : alpha), 1.);
+}`;
+
+// パス2: 露出・ノイズ・ガンマ(Log)
+const FS_OUT = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform sampler2D acc; uniform float expo; uniform float isoN; uniform float time; uniform vec2 res; uniform int mode;
+float hash(vec2 s){ vec3 p3=fract(vec3(s.xyx)*.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }
+vec3 srgb2lin(vec3 c){ return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(0.04045,c)); }
+vec3 lin2srgb(vec3 c){ c=clamp(c,0.,1.); return mix(c*12.92, 1.055*pow(c,vec3(1./2.4))-0.055, step(0.0031308,c)); }
+// Sony S-Log3 OETF
+vec3 slog3(vec3 x){
+  vec3 hi = (420.0 + log((x+0.01)/(0.18+0.01))/log(10.0)*261.5)/1023.0;
+  vec3 lo = (x*(171.2102946929-95.0)/0.01125 + 95.0)/1023.0;
+  return mix(lo, hi, step(0.01125, x));
+}
+// Cineon風 (black 95 / white 685, 0.6 gamma 相当)
+vec3 cineon(vec3 x){
+  vec3 off = vec3(pow(10.,(95.-685.)*0.002/0.6));
+  vec3 v = (log(max(x*(1.-off.x)+off, vec3(1e-6)))/log(10.)*0.6/0.002 + 685.)/1023.;
+  return v;
+}
+void main(){
+  vec3 c = srgb2lin(texture(acc, uv).rgb);
+  c *= expo;
+  // ISOに応じたショットノイズ+読み出しノイズ
+  float n1 = hash(uv*res + time) - 0.5;
+  float n2 = hash(uv*res*1.37 + time*1.7 + 11.) - 0.5;
+  float g = (n1+n2) * isoN;
+  c += g * (0.02 + sqrt(max(c,vec3(0.))) * 0.25) * 0.5;
+  vec3 r;
+  if(mode==1) r = slog3(max(c,vec3(0.)));
+  else if(mode==2) r = cineon(max(c,vec3(0.)));
+  else r = lin2srgb(c);
+  o = vec4(clamp(r,0.,1.), 1.);
+}`;
+
+function sh(type, src){
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function prog(fs){
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+  gl.bindAttribLocation(p,0,'p'); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+let pAcc, pOut, camTex, ping=[], pong=0, W=0, H=0, first=1, useFloat=false;
+
+function initGL(){
+  pAcc = prog(FS_ACC); pOut = prog(FS_OUT);
+  const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+  camTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, camTex);
+  setTexParams();
+  useFloat = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float'));
+}
+function setTexParams(){
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+function makeTarget(){
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); setTexParams();
+  if(useFloat) gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,W,H,0,gl.RGBA,gl.HALF_FLOAT,null);
+  else gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,W,H,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE && useFloat){
+    useFloat=false; return makeTarget();
+  }
+  return {t,f};
+}
+function resize(w,h){
+  W=w; H=h; cv.width=w; cv.height=h;
+  ping.forEach(x=>{gl.deleteTexture(x.t);gl.deleteFramebuffer(x.f);});
+  ping=[makeTarget(),makeTarget()]; pong=0; first=1;
+}
+
+let frames=0, lastT=performance.now(), fps=0;
+function render(now){
+  if(video.readyState>=2 && video.videoWidth){
+    if(video.videoWidth!==W || video.videoHeight!==H) resize(video.videoWidth, video.videoHeight);
+    gl.bindTexture(gl.TEXTURE_2D, camTex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+
+    // シャッター: 1/30秒より遅いと蓄積(モーションブラー)
+    const hw = st.hw;
+    const alpha = hw ? 1 : Math.min(1, (1/30)/st.shutter);
+    // 露出: 基準 ISO400, 1/60秒, 補正EV
+    const expo = hw ? Math.pow(2,st.ev) : (st.iso/400) * (st.shutter*60) * Math.pow(2,st.ev);
+    const isoN = Math.sqrt(st.iso/100) * 0.06;
+
+    const src = ping[pong], dst = ping[1-pong];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.f); gl.viewport(0,0,W,H);
+    gl.useProgram(pAcc);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, camTex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, src.t);
+    gl.uniform1i(gl.getUniformLocation(pAcc,'cam'),0);
+    gl.uniform1i(gl.getUniformLocation(pAcc,'prev'),1);
+    gl.uniform1f(gl.getUniformLocation(pAcc,'alpha'),alpha);
+    gl.uniform1f(gl.getUniformLocation(pAcc,'first'),first);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    first=0; pong=1-pong;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0,0,W,H);
+    gl.useProgram(pOut);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, ping[pong].t);
+    gl.uniform1i(gl.getUniformLocation(pOut,'acc'),0);
+    gl.uniform1f(gl.getUniformLocation(pOut,'expo'),expo);
+    gl.uniform1f(gl.getUniformLocation(pOut,'isoN'),isoN);
+    gl.uniform1f(gl.getUniformLocation(pOut,'time'),(now%1000)/1000*37.0);
+    gl.uniform2f(gl.getUniformLocation(pOut,'res'),W,H);
+    gl.uniform1i(gl.getUniformLocation(pOut,'mode'),st.gamma);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+    frames++;
+    if(now-lastT>1000){ fps=frames*1000/(now-lastT); frames=0; lastT=now;
+      $('info').textContent = `${W}x${H} ${fps.toFixed(0)}fps  ISO${st.iso}  1/${Math.round(1/st.shutter)}  ${['Normal','S-Log3','Log'][st.gamma]}${st.hw?' [HW]':''}`; }
+  }
+  requestAnimationFrame(render);
+}
+
+// ---------- 撮影・録画 ----------
+async function saveBlob(blob, name){
+  const file = new File([blob], name, {type:blob.type});
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    try{ await navigator.share({files:[file]}); return; }catch(e){ if(e.name==='AbortError') return; }
+  }
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),10000);
+}
+const stamp = () => new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+$('shot').onclick = ()=> cv.toBlob(b=>saveBlob(b,`IMG_${stamp()}_${['N','SLog3','Log'][st.gamma]}.png`),'image/png');
+
+let mr=null, chunks=[];
+$('vid').onclick = ()=>{
+  if(st.recording){ mr.stop(); return; }
+  const types=['video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9','video/webm'];
+  const mime = types.find(t=>window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+  if(!mime){ alert('このブラウザは録画に対応していません'); return; }
+  const s = cv.captureStream(30);
+  mr = new MediaRecorder(s,{mimeType:mime, videoBitsPerSecond:20_000_000});
+  chunks=[];
+  mr.ondataavailable=e=>{ if(e.data.size) chunks.push(e.data); };
+  mr.onstop=()=>{
+    st.recording=false; $('rec').style.display='none'; $('vid').classList.remove('on'); $('vid').textContent='録画';
+    const ext = mime.includes('mp4')?'mp4':'webm';
+    saveBlob(new Blob(chunks,{type:mime}), `MOV_${stamp()}.${ext}`);
+  };
+  mr.start(); st.recording=true; $('rec').style.display='inline'; $('vid').classList.add('on'); $('vid').textContent='停止';
+};
+
+// ---------- 起動 ----------
+(async function(){
+  updUI();
+  if(gl){ try{ initGL(); }catch(e){ showMsg('シェーダーエラー:<br><small>'+e.message+'</small>'); return; } }
+  await startCamera();
+  requestAnimationFrame(render);
+  if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(console.warn);
+})();
+</script>
+</body>
+</html>
